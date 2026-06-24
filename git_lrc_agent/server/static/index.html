@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>git-lrc — AI Code Review Dashboard</title>
+    <meta name="description" content="Local AI-powered code review dashboard for git-lrc-agent">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <!-- ═══════════════════ HEADER BAR ═══════════════════ -->
+    <header id="app-header">
+        <div class="header-left">
+            <span class="logo">🔍</span>
+            <h1>git-lrc</h1>
+            <span class="badge badge-version">v0.1.0</span>
+        </div>
+        <div class="header-center">
+            <div id="risk-meter" class="risk-meter">
+                <span class="risk-label">Risk Score</span>
+                <div class="risk-bar-track">
+                    <div class="risk-bar-fill" id="risk-bar-fill"></div>
+                </div>
+                <span class="risk-value" id="risk-value">0</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <button id="btn-copy-issues" class="btn btn-secondary" title="Copy all issues">
+                📋 Copy Issues
+            </button>
+            <button id="btn-skip" class="btn btn-danger" title="Skip — abort commit">
+                ⏭ Skip
+            </button>
+            <button id="btn-commit" class="btn btn-primary" title="Accept and commit">
+                ✅ Commit
+            </button>
+        </div>
+    </header>
+
+    <!-- ═══════════════════ MAIN LAYOUT ═══════════════════ -->
+    <main id="app-main">
+        <!-- LEFT PANEL: File Tree + Filters -->
+        <aside id="panel-left" class="panel">
+            <div class="panel-section">
+                <h2 class="panel-title">
+                    Files
+                    <span class="count-badge" id="file-count">0</span>
+                </h2>
+                <ul id="file-tree" class="file-tree"></ul>
+            </div>
+
+            <div class="panel-section">
+                <h2 class="panel-title">Filters</h2>
+                <div id="filter-panel" class="filter-panel">
+                    <!-- Severity filters -->
+                    <div class="filter-group">
+                        <h3>Severity</h3>
+                        <label class="filter-chip critical"><input type="checkbox" data-filter="severity" value="critical" checked> 🔴 Critical <span class="chip-count" data-count-severity="critical">0</span></label>
+                        <label class="filter-chip high"><input type="checkbox" data-filter="severity" value="high" checked> 🟠 High <span class="chip-count" data-count-severity="high">0</span></label>
+                        <label class="filter-chip medium"><input type="checkbox" data-filter="severity" value="medium" checked> 🟡 Medium <span class="chip-count" data-count-severity="medium">0</span></label>
+                        <label class="filter-chip low"><input type="checkbox" data-filter="severity" value="low" checked> 🔵 Low <span class="chip-count" data-count-severity="low">0</span></label>
+                        <label class="filter-chip info"><input type="checkbox" data-filter="severity" value="info" checked> ⚪ Info <span class="chip-count" data-count-severity="info">0</span></label>
+                    </div>
+                    <!-- Pillar filters -->
+                    <div class="filter-group">
+                        <h3>Pillars</h3>
+                        <label class="filter-chip"><input type="checkbox" data-filter="pillar" value="Outages" checked> Outages <span class="chip-count" data-count-pillar="Outages">0</span></label>
+                        <label class="filter-chip"><input type="checkbox" data-filter="pillar" value="Breaches" checked> Breaches <span class="chip-count" data-count-pillar="Breaches">0</span></label>
+                        <label class="filter-chip"><input type="checkbox" data-filter="pillar" value="Technical Debt" checked> Tech Debt <span class="chip-count" data-count-pillar="Technical Debt">0</span></label>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- CENTER PANEL: Diff Viewer -->
+        <section id="panel-center" class="panel">
+            <div class="panel-toolbar">
+                <div class="issue-navigator">
+                    <button id="btn-prev-issue" class="btn btn-icon" title="Previous issue (p)">◀</button>
+                    <span id="issue-position">0 of 0</span>
+                    <button id="btn-next-issue" class="btn btn-icon" title="Next issue (n)">▶</button>
+                </div>
+                <span id="current-file-name" class="current-file"></span>
+            </div>
+            <div id="diff-viewport" class="diff-viewport">
+                <div id="diff-container" class="diff-container">
+                    <p class="empty-state">Select a file to view its diff and inline comments.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- RIGHT PANEL: Summary Deck -->
+        <aside id="panel-right" class="panel">
+            <div class="panel-section">
+                <h2 class="panel-title">Summary</h2>
+                <div id="summary-deck" class="summary-deck">
+                    <div class="summary-card">
+                        <div class="summary-stat" id="stat-total-issues">0</div>
+                        <div class="summary-label">Issues</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-stat" id="stat-files">0</div>
+                        <div class="summary-label">Files Changed</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="summary-stat" id="stat-fix-time">0m</div>
+                        <div class="summary-label">Est. Fix Time</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h2 class="panel-title">Severity Breakdown</h2>
+                <div id="severity-chart" class="severity-chart"></div>
+            </div>
+
+            <div class="panel-section">
+                <h2 class="panel-title">Category Breakdown</h2>
+                <div id="category-chart" class="category-chart"></div>
+            </div>
+
+            <div class="panel-section">
+                <h2 class="panel-title">Top Issues</h2>
+                <div id="top-issues" class="top-issues"></div>
+            </div>
+
+            <div class="panel-section">
+                <h2 class="panel-title">Prose Summary</h2>
+                <p id="prose-summary" class="prose-summary"></p>
+            </div>
+        </aside>
+    </main>
+
+    <!-- ═══════════════════ SCRIPTS ═══════════════════ -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
