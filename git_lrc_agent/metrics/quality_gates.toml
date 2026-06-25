@@ -1,0 +1,17 @@
+[quality_gates]
+# Fail if any of these thresholds are exceeded
+max_critical_issues = 0
+max_vulnerabilities = 2
+max_bugs = 5
+max_code_smells = 15
+min_security_rating = "B"      # Must be at least B
+min_reliability_rating = "B"   # Must be at least B
+min_maintainability_rating = "C" # Must be at least C
+min_overall_score = 50.0
+
+[ratings]
+# A-E scale thresholds for classifying severities
+security_critical_limit = 0
+security_high_limit = 1
+bugs_critical_limit = 0
+bugs_high_limit = 3

@@ -186,6 +186,70 @@ def create_app(review: StructuredReview) -> FastAPI:
             "files_reviewed": len(app.state.review.files),
         })
 
+    @app.get("/api/metrics")
+    async def get_metrics():
+        """Return SonarQube-style health metrics for the dashboard."""
+        from git_lrc_agent.metrics.calculator import MetricsCalculator
+        from git_lrc_agent.metrics.db import MetricsDB
+        from git_lrc_agent.git.staged_diff_provider import StagedDiffProvider
+        
+        try:
+            provider = StagedDiffProvider()
+            repo_path = provider.repo_path
+        except Exception:
+            repo_path = Path.cwd()
+
+        # Calculate metrics for the active review.
+        history_reviews = []
+        reviews_dir = repo_path / ".git" / "lrc" / "reviews"
+        if reviews_dir.exists():
+            for rf in sorted(reviews_dir.glob("*.json")):
+                if rf.name != f"{app.state.review.id}.json":
+                    try:
+                        history_reviews.append(StructuredReview.load(rf))
+                    except Exception:
+                        pass
+
+        calculator = MetricsCalculator(app.state.review, repo_path=repo_path)
+        metrics = calculator.calculate_metrics(review_history=history_reviews)
+
+        db = MetricsDB(repo_path)
+        trend = db.get_trend() or {"bugs_trend": 0, "vulns_trend": 0, "score_trend": 0.0}
+
+        return JSONResponse({
+            "metrics": {
+                "bugs": metrics.bugs_count,
+                "vulnerabilities": metrics.vulnerabilities_count,
+                "code_smells": metrics.code_smells_count,
+                "security_rating": metrics.security_rating.value,
+                "maintainability_rating": metrics.maintainability_rating.value,
+                "reliability_rating": metrics.reliability_rating.value,
+                "loc": metrics.lines_of_code,
+                "technical_debt": f"{metrics.technical_debt_minutes / 60:.1f}h",
+                "open_issues": metrics.open_issues_count,
+                "overall_score": round(metrics.overall_health_score, 1),
+                "quality_gates": metrics.quality_gates_status,
+                "quality_status": metrics.quality_status,
+            },
+            "trend": trend,
+        })
+
+    @app.get("/api/metrics/history")
+    async def get_metrics_history(limit: Optional[int] = 10):
+        """Return historical metrics for trend charts."""
+        from git_lrc_agent.metrics.db import MetricsDB
+        from git_lrc_agent.git.staged_diff_provider import StagedDiffProvider
+        
+        try:
+            provider = StagedDiffProvider()
+            repo_path = provider.repo_path
+        except Exception:
+            repo_path = Path.cwd()
+
+        db = MetricsDB(repo_path)
+        history = db.get_history(limit)
+        return JSONResponse(history)
+
     return app
 
 

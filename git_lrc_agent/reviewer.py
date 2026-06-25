@@ -207,6 +207,10 @@ async def run_review(
     # Disable inline comments (we handle rendering ourselves).
     get_settings().set("pr_reviewer.inline_code_comments", False)
 
+    # Configure higher issue thresholds for detailed/advanced review.
+    if get_settings().pr_reviewer.get("num_max_findings", 3) == 3:
+        get_settings().set("pr_reviewer.num_max_findings", 20)
+
     # 3. Run PR-Agent's PRReviewer.
     from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
     from pr_agent.tools.pr_reviewer import PRReviewer
@@ -275,10 +279,44 @@ async def run_review(
 
         # Initialize TokenHandler
         from pr_agent.algo.token_handler import TokenHandler
+
+        system_prompt = get_settings().pr_review_prompt.system
+
+        # Enrich KeyIssuesComponentLink in Pydantic schema within the system prompt to enforce suggestion and fix_confidence fields
+        old_class_def = (
+            "class KeyIssuesComponentLink(BaseModel):\n"
+            "    relevant_file: str = Field(description=\"The full file path of the relevant file\")\n"
+            "    issue_header: str = Field(description=\"One or two word title for the issue. For example: 'Possible Bug', etc.\")\n"
+            "    issue_content: str = Field(description=\"A short and concise description of the issue, why it matters, and the specific scenario or input that triggers it. Do not mention line numbers in this field.\")\n"
+            "    start_line: int = Field(description=\"The start line that corresponds to this issue in the relevant file\")\n"
+            "    end_line: int = Field(description=\"The end line that corresponds to this issue in the relevant file\")"
+        )
+        new_class_def = (
+            "class KeyIssuesComponentLink(BaseModel):\n"
+            "    relevant_file: str = Field(description=\"The full file path of the relevant file\")\n"
+            "    issue_header: str = Field(description=\"One or two word title for the issue. For example: 'Possible Bug', etc.\")\n"
+            "    issue_content: str = Field(description=\"A short and concise description of the issue, why it matters, and the specific scenario or input that triggers it. Do not mention line numbers in this field.\")\n"
+            "    start_line: int = Field(description=\"The start line that corresponds to this issue in the relevant file\")\n"
+            "    end_line: int = Field(description=\"The end line that corresponds to this issue in the relevant file\")\n"
+            "    suggestion: str = Field(description=\"A concrete suggestion for a fix, including code examples if possible.\")\n"
+            "    fix_confidence: int = Field(description=\"Your confidence in the suggested fix as a percentage from 0 to 100.\")"
+        )
+
+        if old_class_def in system_prompt:
+            system_prompt = system_prompt.replace(old_class_def, new_class_def)
+        else:
+            # Fallback if whitespace/carriage returns differ slightly
+            normalized_old = old_class_def.replace("\r\n", "\n").strip()
+            normalized_system = system_prompt.replace("\r\n", "\n")
+            if normalized_old in normalized_system:
+                system_prompt = normalized_system.replace(normalized_old, new_class_def.replace("\r\n", "\n"))
+            else:
+                system_prompt += "\n\nInject the 'suggestion' and 'fix_confidence' fields into every item in the 'key_issues_to_review' list."
+
         reviewer.token_handler = TokenHandler(
             provider.pr,
             reviewer.vars,
-            get_settings().pr_review_prompt.system,
+            system_prompt,
             get_settings().pr_review_prompt.user
         )
 
@@ -337,6 +375,30 @@ async def run_review(
     print(f"✅ Review saved: {review_path}")
     print(f"   {review.summary.total_issues} issue(s) found  |  "
           f"Risk score: {review.summary.risk_score}/100")
+
+    # 10. Calculate and save project health metrics.
+    try:
+        from git_lrc_agent.metrics.calculator import MetricsCalculator
+        from git_lrc_agent.metrics.db import MetricsDB
+        
+        # Load review history to calculate open/persistent issues.
+        history_reviews = []
+        review_files = sorted(reviews_dir.glob("*.json"))
+        for rf in review_files:
+            if rf.name != f"{review.id}.json":
+                try:
+                    history_reviews.append(StructuredReview.load(rf))
+                except Exception:
+                    pass
+        
+        calculator = MetricsCalculator(review, repo_path=provider.repo_path)
+        metrics = calculator.calculate_metrics(review_history=history_reviews)
+        
+        db = MetricsDB(provider.repo_path)
+        db.save_metrics(review.id, metrics)
+        print(f"📊 Project Health Metrics updated: Gates {metrics.quality_gates_status} | Overall Health: {metrics.overall_health_score:.1f}%")
+    except Exception as e:
+        print(f"⚠  Could not calculate or save metrics: {e}")
 
     return review
 

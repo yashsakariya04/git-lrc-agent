@@ -40,9 +40,16 @@
         </div>
     </header>
 
+    <!-- ═══════════════════ NAVIGATION TABS ═══════════════════ -->
+    <div id="app-tabs" class="app-tabs">
+        <button id="tab-review" class="tab-btn active">🔍 Code Review</button>
+        <button id="tab-health" class="tab-btn">📊 Project Health</button>
+    </div>
+
     <!-- ═══════════════════ MAIN LAYOUT ═══════════════════ -->
     <main id="app-main">
-        <!-- LEFT PANEL: File Tree + Filters -->
+        <div id="tab-content-review" class="tab-content-wrapper active-tab">
+            <!-- LEFT PANEL: File Tree + Filters -->
         <aside id="panel-left" class="panel">
             <div class="panel-section">
                 <h2 class="panel-title">
@@ -132,6 +139,105 @@
                 <p id="prose-summary" class="prose-summary"></p>
             </div>
         </aside>
+        </div>
+
+        <!-- ═══════════════════ PROJECT HEALTH TAB ═══════════════════ -->
+        <div id="tab-content-health" class="tab-content-wrapper">
+            <div class="health-dashboard-container">
+                <!-- Quality Gate Status Banner -->
+                <div id="gate-status-banner" class="gate-status-banner gate-PASS">
+                    <span class="gate-icon" id="gate-icon">🛡️</span>
+                    <div class="gate-info">
+                        <h3 id="gate-title">Quality Gate Passed</h3>
+                        <p id="gate-message">All health metrics meet the configured target thresholds.</p>
+                    </div>
+                </div>
+
+                <div class="health-dashboard-grid">
+                    <!-- Column 1: Overall Health Score Widget -->
+                    <div class="health-card overall-card">
+                        <h3 class="health-card-title">Overall Project Health</h3>
+                        <div class="health-score-gauge">
+                            <svg viewBox="0 0 100 100" class="gauge-svg">
+                                <circle cx="50" cy="50" r="40" class="gauge-track"></circle>
+                                <circle cx="50" cy="50" r="40" class="gauge-fill" id="health-gauge-fill"></circle>
+                                <text x="50" y="55" class="gauge-text" id="health-score-text">0%</text>
+                            </svg>
+                        </div>
+                        <div class="health-status-desc" id="health-status-desc">EXCELLENT</div>
+                    </div>
+
+                    <!-- Column 2: Health Ratings (Security, Reliability, Maintainability) -->
+                    <div class="health-card ratings-card">
+                        <h3 class="health-card-title">Health Ratings</h3>
+                        <div class="ratings-list">
+                            <div class="rating-row">
+                                <div class="rating-meta">
+                                    <span class="rating-icon">🔓</span>
+                                    <span class="rating-name">Security</span>
+                                </div>
+                                <div id="rating-security" class="rating-badge rating-A">A</div>
+                            </div>
+                            <div class="rating-row">
+                                <div class="rating-meta">
+                                    <span class="rating-icon">🐛</span>
+                                    <span class="rating-name">Reliability</span>
+                                </div>
+                                <div id="rating-reliability" class="rating-badge rating-A">A</div>
+                            </div>
+                            <div class="rating-row">
+                                <div class="rating-meta">
+                                    <span class="rating-icon">💩</span>
+                                    <span class="rating-name">Maintainability</span>
+                                </div>
+                                <div id="rating-maintainability" class="rating-badge rating-A">A</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Column 3: Quantitative Metrics -->
+                    <div class="health-card stats-card">
+                        <h3 class="health-card-title">Health Metrics</h3>
+                        <div class="metrics-grid">
+                            <div class="metric-box">
+                                <div class="metric-num" id="metrics-bugs">0</div>
+                                <div class="metric-name">Bugs</div>
+                                <div class="metric-trend" id="trend-bugs">➡️ 0</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-num" id="metrics-vulns">0</div>
+                                <div class="metric-name">Vulnerabilities</div>
+                                <div class="metric-trend" id="trend-vulns">➡️ 0</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-num" id="metrics-smells">0</div>
+                                <div class="metric-name">Code Smells</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-num" id="metrics-loc">0</div>
+                                <div class="metric-name">Lines Added</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-num" id="metrics-debt">0h</div>
+                                <div class="metric-name">Technical Debt</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="metric-num" id="metrics-open">0</div>
+                                <div class="metric-name">Open Issues</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Trend Chart Section -->
+                <div class="health-card chart-card">
+                    <h3 class="health-card-title">Project Health Score Trend</h3>
+                    <div class="chart-container">
+                        <svg id="trend-chart-svg" class="trend-chart-svg" viewBox="0 0 600 200"></svg>
+                    </div>
+                </div>
+            </div>
+        </div>
     </main>
 
     <!-- ═══════════════════ SCRIPTS ═══════════════════ -->
