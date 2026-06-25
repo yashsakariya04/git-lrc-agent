@@ -88,6 +88,7 @@ def create_app(review: StructuredReview) -> FastAPI:
                     default=None,
                     key=lambda s: ["info", "low", "medium", "high", "critical"].index(s) if s else -1,
                 ),
+                "patch": getattr(f, "patch", None),
             })
         return JSONResponse(files)
 
@@ -135,6 +136,55 @@ def create_app(review: StructuredReview) -> FastAPI:
             for cat in pillar.categories:
                 taxonomy[pillar.name][cat.name] = [p.name for p in cat.patterns]
         return JSONResponse(taxonomy)
+
+    # ------------------------------------------------------------------
+    # New endpoints: all issues, by-file, line-map, stats
+    # ------------------------------------------------------------------
+
+    @app.get("/api/issues/all")
+    async def get_all_issues(
+        sort_by: Optional[str] = "severity",  # severity | line | file
+        limit: Optional[int] = None,
+    ):
+        """Return ALL issues (not just top 3), with optional sorting."""
+        issues = list(app.state.review.issues)
+
+        if sort_by == "severity":
+            severity_order = ["critical", "high", "medium", "low", "info"]
+            issues = sorted(issues, key=lambda i: severity_order.index(i.severity.value))
+        elif sort_by == "line":
+            issues = sorted(issues, key=lambda i: (i.file, i.line_start))
+        elif sort_by == "file":
+            issues = sorted(issues, key=lambda i: i.file)
+
+        if limit is not None:
+            issues = issues[:limit]
+
+        return JSONResponse([json.loads(i.model_dump_json()) for i in issues])
+
+    @app.get("/api/issues/by-file/{file_path:path}")
+    async def get_issues_by_file(file_path: str):
+        """Get all issues for a specific file."""
+        issues = [i for i in app.state.review.issues if i.file == file_path]
+        return JSONResponse([json.loads(i.model_dump_json()) for i in issues])
+
+    @app.get("/api/issues/line-map")
+    async def get_line_map():
+        """Return a map of file:line -> issue IDs for IDE plugins."""
+        return JSONResponse(app.state.review.summary.issues_by_line)
+
+    @app.get("/api/stats")
+    async def get_stats():
+        """Return detailed statistics about the review."""
+        return JSONResponse({
+            "total_issues": app.state.review.summary.total_issues,
+            "by_severity": app.state.review.summary.issues_by_severity,
+            "by_pillar": app.state.review.summary.issues_by_pillar,
+            "by_category": app.state.review.summary.issues_by_category,
+            "risk_score": app.state.review.summary.risk_score,
+            "estimated_fix_time_minutes": app.state.review.summary.estimated_fix_time_minutes,
+            "files_reviewed": len(app.state.review.files),
+        })
 
     return app
 

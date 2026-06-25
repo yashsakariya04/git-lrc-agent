@@ -86,15 +86,28 @@ def _keyword_classify(
 
 
 def _compute_keyword_score(text: str, keywords: tuple[str, ...]) -> int:
-    """Count how many keywords appear in the text.
+    """Count how many keywords appear in the text with word boundaries.
 
     Uses word-boundary-aware matching so 'auth' doesn't match 'author',
-    but does match 'authentication'.
+    but does match 'authentication', 'auth-token', etc.
+
+    Underscore variations get partial credit (0.5 per hit). The final
+    score is rounded up via ``math.ceil`` so a single partial still
+    contributes 1 to the total.
     """
-    score = 0
+    import math
+
+    score: float = 0
+    text_lower = text.lower()
+
     for kw in keywords:
-        # Use a simple substring match — keywords are already chosen to
-        # be reasonably specific (e.g., 'inject' not 'in').
-        if kw.lower() in text:
+        kw_lower = kw.lower()
+        # Use word boundary regex for more precise matching
+        pattern = r'\b' + re.escape(kw_lower) + r'\b'
+        if re.search(pattern, text_lower):
             score += 1
-    return score
+        # Partial credit for underscore variations (e.g., 'sql_inject' -> 'sql injection')
+        elif '_' in kw_lower and kw_lower.replace('_', '') in text_lower.replace('_', ''):
+            score += 0.5
+
+    return math.ceil(score)

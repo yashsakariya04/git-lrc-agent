@@ -579,6 +579,98 @@ ul { list-style: none; }
     line-height: 1.6;
 }
 
+/* ── New Dashboard Enhancements (Confidence, Tags, Functions) ──── */
+.inline-comment-func {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-default);
+}
+.inline-comment-func code {
+    font-family: var(--font-mono);
+}
+
+.inline-comment-confidence {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-md);
+    padding-top: var(--space-sm);
+    border-top: 1px solid var(--border-muted);
+}
+.confidence-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+.confidence-track {
+    flex: 1;
+    height: 6px;
+    background: var(--bg-elevated);
+    border-radius: 3px;
+    overflow: hidden;
+}
+.confidence-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.6s ease;
+}
+.confidence-value {
+    font-size: 0.8rem;
+    font-weight: 600;
+    min-width: 32px;
+    text-align: right;
+}
+
+.inline-comment-tags, .top-issue-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: var(--space-sm) 0;
+}
+.issue-tag, .issue-tag-sm {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    color: var(--text-secondary);
+}
+.issue-tag.tag-security, .issue-tag-sm.tag-security {
+    border-color: var(--sev-critical);
+    color: var(--sev-critical);
+    background: var(--sev-critical-bg);
+}
+.issue-tag.tag-performance, .issue-tag-sm.tag-performance {
+    border-color: var(--sev-high);
+    color: var(--sev-high);
+    background: var(--sev-high-bg);
+}
+.issue-tag.tag-maintainability, .issue-tag-sm.tag-maintainability {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.top-issue-suggestion {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-sm);
+    margin-top: 4px;
+    border-left: 2px solid var(--accent-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* ── Scrollbar ─────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }

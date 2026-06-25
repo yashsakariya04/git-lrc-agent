@@ -249,39 +249,62 @@ def _cmd_dashboard(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _print_review_summary(review) -> None:
-    """Print a compact terminal summary of the review."""
+    """Print a comprehensive terminal summary of the review."""
     s = review.summary
     sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🔵", "info": "⚪"}
 
     print()
-    print(f"╔══════════════════════════════════════════════╗")
-    print(f"║  git-lrc Review Summary                      ║")
-    print(f"╠══════════════════════════════════════════════╣")
-    print(f"║  Issues: {s.total_issues:<5}  Risk Score: {s.risk_score}/100       ║")
+    print(f"╔══════════════════════════════════════════════════════════╗")
+    print(f"║  git-lrc Review Summary                                  ║")
+    print(f"╠══════════════════════════════════════════════════════════╣")
+    print(f"║  Total Issues: {s.total_issues:<5}  Risk Score: {s.risk_score}/100           ║")
     if s.estimated_fix_time_minutes > 0:
         hours = s.estimated_fix_time_minutes // 60
         mins = s.estimated_fix_time_minutes % 60
         time_str = f"{hours}h {mins}m" if hours else f"{mins}m"
-        print(f"║  Est. fix time: {time_str:<30} ║")
-    print(f"╠══════════════════════════════════════════════╣")
+        print(f"║  Est. fix time: {time_str:<38} ║")
+    print(f"╠══════════════════════════════════════════════════════════╣")
 
-    # Severity breakdown.
+    # Severity breakdown with percentages.
     for sev_name in ("critical", "high", "medium", "low", "info"):
         count = s.issues_by_severity.get(sev_name, 0)
         if count > 0:
             icon = sev_icon.get(sev_name, "")
-            print(f"║  {icon} {sev_name.capitalize():<12} {count:<28} ║")
+            pct = (count / s.total_issues * 100) if s.total_issues > 0 else 0
+            print(f"║  {icon} {sev_name.capitalize():<12} {count:<5} ({pct:>5.1f}%)              ║")
 
-    print(f"╚══════════════════════════════════════════════╝")
+    print(f"╠══════════════════════════════════════════════════════════╣")
 
-    # Top issues.
     if s.top_issues:
+        max_display = min(len(s.top_issues), 15)  # Show more issues
+        print(f"║  Top {max_display} Issues:                                            ║")
+        print(f"╚══════════════════════════════════════════════════════════╝")
         print()
-        print("Top issues:")
-        for i, issue in enumerate(s.top_issues[:5], 1):
+        for i, issue in enumerate(s.top_issues[:max_display], 1):
             icon = sev_icon.get(issue.severity.value, "")
-            print(f"  {i}. {icon} [{issue.category}] {issue.title}")
-            print(f"     {issue.file}:{issue.line_start}")
+            # Show line numbers and suggestion preview
+            print(f"  [{i:2d}] {icon} {issue.severity.value.upper():<8} {issue.category:<20}")
+            print(f"       📄 {issue.file}:{issue.line_start}:{issue.line_end}")
+            print(f"       💬 {issue.title}")
+            if issue.message:
+                msg_preview = issue.message[:80] + "..." if len(issue.message) > 80 else issue.message
+                print(f"       ℹ️  {msg_preview}")
+            if issue.suggestion:
+                sugg_preview = issue.suggestion[:60] + "..." if len(issue.suggestion) > 60 else issue.suggestion
+                print(f"       💡 FIX: {sugg_preview}")
+            print()
+    else:
+        print(f"║  No issues found!                                        ║")
+        print(f"╚══════════════════════════════════════════════════════════╝")
+
+    # File hotspots summary.
+    if s.file_hotspots:
+        print("\n📊 Issue Hotspots by File:")
+        print("-" * 70)
+        for file_info in s.file_hotspots[:10]:  # Top 10 files
+            icon = sev_icon.get(file_info.max_severity.value if file_info.max_severity else "info", "⚪")
+            print(f"  {icon} {file_info.filename:<40} {file_info.issue_count:3d} issues")
+
     print()
 
 

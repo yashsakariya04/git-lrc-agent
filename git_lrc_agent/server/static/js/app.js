@@ -29,14 +29,16 @@ const state = {
 
 document.addEventListener("DOMContentLoaded", async () => {
     try {
-        const [reviewRes, filesRes] = await Promise.all([
+        const [reviewRes, filesRes, allIssuesRes] = await Promise.all([
             fetch("/api/review").then(r => r.json()),
             fetch("/api/files").then(r => r.json()),
+            fetch("/api/issues/all?sort_by=severity").then(r => r.json()),
         ]);
 
         state.review = reviewRes;
         state.files = filesRes;
-        state.issues = reviewRes.issues || [];
+        // Use all issues from the new endpoint (not limited to top_issues)
+        state.issues = allIssuesRes || reviewRes.issues || [];
         state.filteredIssues = [...state.issues];
 
         renderFileTree();
@@ -168,24 +170,122 @@ function navigateFile(direction) {
 function renderDiff(filename) {
     const container = document.getElementById("diff-container");
 
-    // Find the patch from the review data.
+    const file = state.files.find(f => f.filename === filename);
     const fileIssues = state.filteredIssues.filter(i => i.file === filename);
 
-    // Get the diff from the review raw data.
-    // For now, render a simple representation based on issues.
-    // The full diff would come from a /api/diff endpoint.
+    if (!file) {
+        container.innerHTML = `<p class="empty-state">File not found.</p>`;
+        return;
+    }
+
+    if (!file.patch) {
+        renderIssuesOnlyFallback(fileIssues, container);
+        return;
+    }
 
     let html = `<table class="diff-table">`;
+    const lines = file.patch.split("\n");
+    
+    let oldLineNum = 0;
+    let newLineNum = 0;
+    const renderedIssueIds = new Set();
 
-    // If we have issues, render them as inline comments.
+    function getIssuesForLine(lineNum) {
+        return fileIssues.filter(issue => {
+            return issue.line_end === lineNum && !renderedIssueIds.has(issue.id);
+        });
+    }
+
+    lines.forEach(line => {
+        if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) {
+            return;
+        }
+
+        if (line.startsWith("@@ ")) {
+            const match = line.match(/^@@ -(\d+),?\d* \+(\d+),?\d* @@/);
+            if (match) {
+                oldLineNum = parseInt(match[1], 10);
+                newLineNum = parseInt(match[2], 10);
+            }
+            html += `<tr class="diff-line-hunk">
+                <td class="diff-line-num"></td>
+                <td class="diff-line-num"></td>
+                <td class="diff-line-content">${escapeHtml(line)}</td>
+            </tr>`;
+            return;
+        }
+
+        if (line.startsWith("-")) {
+            html += `<tr class="diff-line-del">
+                <td class="diff-line-num">${oldLineNum}</td>
+                <td class="diff-line-num"></td>
+                <td class="diff-line-content">${escapeHtml(line)}</td>
+            </tr>`;
+            oldLineNum++;
+        } else if (line.startsWith("+")) {
+            html += `<tr class="diff-line-add">
+                <td class="diff-line-num"></td>
+                <td class="diff-line-num">${newLineNum}</td>
+                <td class="diff-line-content">${escapeHtml(line)}</td>
+            </tr>`;
+            
+            const lineIssues = getIssuesForLine(newLineNum);
+            lineIssues.forEach((issue, idx) => {
+                renderedIssueIds.add(issue.id);
+                html += `<tr>
+                    <td colspan="3">${renderInlineComment(issue, idx)}</td>
+                </tr>`;
+            });
+            
+            newLineNum++;
+        } else {
+            const cleanLine = line.startsWith(" ") ? line.substring(1) : line;
+            html += `<tr class="diff-line-context">
+                <td class="diff-line-num">${oldLineNum}</td>
+                <td class="diff-line-num">${newLineNum}</td>
+                <td class="diff-line-content">${escapeHtml(cleanLine)}</td>
+            </tr>`;
+            
+            const lineIssues = getIssuesForLine(newLineNum);
+            lineIssues.forEach((issue, idx) => {
+                renderedIssueIds.add(issue.id);
+                html += `<tr>
+                    <td colspan="3">${renderInlineComment(issue, idx)}</td>
+                </tr>`;
+            });
+
+            oldLineNum++;
+            newLineNum++;
+        }
+    });
+
+    fileIssues.forEach((issue, idx) => {
+        if (!renderedIssueIds.has(issue.id)) {
+            html += `<tr class="diff-line-hunk">
+                <td colspan="3">@@ Line ${issue.line_start}-${issue.line_end} (outside diff context) @@</td>
+            </tr>
+            <tr>
+                <td colspan="3">${renderInlineComment(issue, idx)}</td>
+            </tr>`;
+        }
+    });
+
+    html += `</table>`;
+    container.innerHTML = html;
+}
+
+function renderIssuesOnlyFallback(fileIssues, container) {
+    let html = `<table class="diff-table">`;
     if (fileIssues.length > 0) {
         fileIssues.forEach((issue, idx) => {
-            // Hunk header.
             html += `<tr class="diff-line-hunk"><td class="diff-line-num"></td><td class="diff-line-content">@@ Lines ${issue.line_start}-${issue.line_end} @@</td></tr>`;
-
-            // Code snippet if available.
             if (issue.code_snippet) {
                 issue.code_snippet.split("\n").forEach((line, lineIdx) => {
+                    const lineNum = issue.line_start + lineIdx;
+                    html += `<tr class="diff-line-add"><td class="diff-line-num">${lineNum}</td><td class="diff-line-content">${escapeHtml(line)}</td></tr>`;
+                });
+            } else if (issue.context_lines && issue.context_lines.length > 0) {
+                issue.context_lines.forEach((line, lineIdx) => {
                     const lineNum = issue.line_start + lineIdx;
                     html += `<tr class="diff-line-add"><td class="diff-line-num">${lineNum}</td><td class="diff-line-content">${escapeHtml(line)}</td></tr>`;
                 });
@@ -194,14 +294,11 @@ function renderDiff(filename) {
                     html += `<tr class="diff-line-highlight"><td class="diff-line-num">${ln}</td><td class="diff-line-content">...</td></tr>`;
                 }
             }
-
-            // Inline comment card.
             html += `<tr><td colspan="2">${renderInlineComment(issue, idx)}</td></tr>`;
         });
     } else {
         html += `<tr><td colspan="2" class="empty-state" style="padding:40px">✅ No issues found in this file.</td></tr>`;
     }
-
     html += `</table>`;
     container.innerHTML = html;
 }
@@ -211,16 +308,44 @@ function renderInlineComment(issue, idx) {
         ? `<div class="inline-comment-suggestion"><strong>💡 Suggestion:</strong><br>${escapeHtml(issue.suggestion)}</div>`
         : "";
 
+    // Function name display
+    const funcName = issue.function_name
+        ? `<span class="inline-comment-func">⚡ <code>${escapeHtml(issue.function_name)}()</code></span>`
+        : "";
+
+    // Fix confidence bar
+    const confidence = issue.fix_confidence != null ? issue.fix_confidence : 50;
+    const confColor = confidence >= 80 ? "var(--accent-success)"
+        : confidence >= 50 ? "var(--accent-warning)"
+        : "var(--sev-critical)";
+    const confidenceBar = `
+        <div class="inline-comment-confidence">
+            <span class="confidence-label">Fix confidence:</span>
+            <div class="confidence-track">
+                <div class="confidence-fill" style="width:${confidence}%;background:${confColor}"></div>
+            </div>
+            <span class="confidence-value" style="color:${confColor}">${confidence}%</span>
+        </div>
+    `;
+
+    // Tags display
+    const tags = (issue.tags && issue.tags.length > 0)
+        ? `<div class="inline-comment-tags">${issue.tags.map(t => `<span class="issue-tag tag-${t}">${t}</span>`).join("")}</div>`
+        : "";
+
     return `
         <div class="inline-comment" data-issue-index="${idx}" id="issue-${issue.id}">
             <div class="inline-comment-header">
                 <span class="severity-badge ${issue.severity}">${issue.severity}</span>
                 <span class="category-tag">${issue.category} → ${issue.pattern}</span>
                 <span class="inline-comment-title">${escapeHtml(issue.title)}</span>
+                ${funcName}
             </div>
             <div class="inline-comment-body">
                 <p>${escapeHtml(issue.message)}</p>
+                ${tags}
                 ${suggestion}
+                ${confidenceBar}
             </div>
         </div>
     `;
@@ -297,6 +422,7 @@ function updateRiskMeter() {
 
 function renderSeverityChart() {
     const counts = state.review.summary?.issues_by_severity || {};
+    const total = state.review.summary?.total_issues || 0;
     const max = Math.max(1, ...Object.values(counts));
     const container = document.getElementById("severity-chart");
 
@@ -309,6 +435,7 @@ function renderSeverityChart() {
     container.innerHTML = sevOrder.map(sev => {
         const count = counts[sev] || 0;
         const pct = (count / max) * 100;
+        const pctOfTotal = total > 0 ? ((count / total) * 100).toFixed(0) : 0;
         return `<div class="sev-row">
             <span class="sev-label">${sev}</span>
             <div class="sev-bar-track"><div class="sev-bar-fill" style="width:${pct}%;background:${colors[sev]}"></div></div>
@@ -332,12 +459,28 @@ function renderTopIssues() {
     const container = document.getElementById("top-issues");
     const icons = { critical: "🔴", high: "🟠", medium: "🟡", low: "🔵", info: "⚪" };
 
-    container.innerHTML = topIssues.map(issue =>
-        `<div class="top-issue" onclick="jumpToIssue('${issue.id}')">
+    // Show more issues than before (up to 15)
+    const displayIssues = topIssues.slice(0, 15);
+
+    container.innerHTML = displayIssues.map(issue => {
+        const confidence = issue.fix_confidence != null ? issue.fix_confidence : 50;
+        const confColor = confidence >= 80 ? "var(--accent-success)"
+            : confidence >= 50 ? "var(--accent-warning)"
+            : "var(--sev-critical)";
+        const suggestionPreview = issue.suggestion
+            ? `<div class="top-issue-suggestion">💡 ${escapeHtml(issue.suggestion.substring(0, 60))}${issue.suggestion.length > 60 ? "..." : ""}</div>`
+            : "";
+        const tagsHtml = (issue.tags && issue.tags.length > 0)
+            ? `<div class="top-issue-tags">${issue.tags.map(t => `<span class="issue-tag-sm tag-${t}">${t}</span>`).join("")}</div>`
+            : "";
+
+        return `<div class="top-issue" onclick="jumpToIssue('${issue.id}')">
             <div class="top-issue-title">${icons[issue.severity] || ""} ${escapeHtml(issue.title)}</div>
             <div class="top-issue-file">${issue.file}:${issue.line_start}</div>
-        </div>`
-    ).join("") || "<p class='empty-state'>No critical issues found.</p>";
+            ${suggestionPreview}
+            ${tagsHtml}
+        </div>`;
+    }).join("") || "<p class='empty-state'>No critical issues found.</p>";
 }
 
 function renderProseSummary() {
@@ -409,7 +552,10 @@ function copyIssues() {
     const markdown = issues.map(i =>
         `### ${i.severity.toUpperCase()}: ${i.title}\n` +
         `**File:** ${i.file}:${i.line_start}\n` +
-        `**Category:** ${i.category} → ${i.pattern}\n\n` +
+        `**Category:** ${i.category} → ${i.pattern}\n` +
+        (i.function_name ? `**Function:** ${i.function_name}\n` : "") +
+        (i.tags && i.tags.length ? `**Tags:** ${i.tags.join(", ")}\n` : "") +
+        `**Fix Confidence:** ${i.fix_confidence != null ? i.fix_confidence : 50}%\n\n` +
         `${i.message}\n` +
         (i.suggestion ? `\n**Suggestion:** ${i.suggestion}\n` : "")
     ).join("\n---\n\n");

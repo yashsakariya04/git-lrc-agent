@@ -36,6 +36,60 @@ from git_lrc_agent.taxonomy.severity import adjust_severity
 from git_lrc_agent.taxonomy.taxonomy import get_compact_taxonomy_for_prompt
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimation (1 token ≈ 4 characters).
+
+    This is a heuristic suitable for budget warnings and chunking
+    decisions, but NOT for hard token limits — real tokenizer counts
+    will vary by model.
+    """
+    return len(text) // 4
+
+
+def _chunk_diff_by_files(provider: StagedDiffProvider, max_tokens: int = 8000) -> list[list]:
+    """Split diff files into chunks to avoid token overflow.
+
+    Parameters
+    ----------
+    provider
+        The staged diff provider.
+    max_tokens
+        Maximum tokens per chunk (~30K tokens = ~120KB of text).
+
+    Returns
+    -------
+    List of file groups, each group's diff should fit within max_tokens.
+    """
+    files = provider.get_diff_files()
+    chunks: list[list] = []
+    current_chunk: list = []
+    current_tokens = 0
+
+    for file_info in files:
+        file_tokens = _estimate_tokens(file_info.patch or "")
+
+        if file_tokens > max_tokens:
+            # Single oversized file — flush current chunk and process alone
+            if current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_tokens = 0
+            chunks.append([file_info])
+        elif current_tokens + file_tokens > max_tokens:
+            # Adding this file exceeds limit — start a new chunk
+            chunks.append(current_chunk)
+            current_chunk = [file_info]
+            current_tokens = file_tokens
+        else:
+            current_chunk.append(file_info)
+            current_tokens += file_tokens
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    return chunks if chunks else [[]]
+
+
 # ---------------------------------------------------------------------------
 # Prompt injection
 # ---------------------------------------------------------------------------
@@ -54,12 +108,26 @@ For each issue, provide ALL of these fields:
 - category: one of the 10 categories listed above
 - pattern: one of the specific patterns listed above
 - severity: one of "critical", "high", "medium", "low", "info"
-- title: short human-readable title
-- message: detailed explanation
-- suggestion: concrete fix recommendation (optional but preferred)
-- code_snippet: the problematic code (optional)
+- title: short human-readable title (max 10 words)
+- message: detailed explanation of why this is a problem (2-3 sentences)
+- suggestion: REQUIRED — provide a concrete fix with code example if possible
+- code_snippet: the exact problematic code extracted from the diff
+- function_name: name of the affected function/method if applicable
+- fix_confidence: your confidence in the suggested fix as a percentage (0-100)
 
-Output the issues under `review.issues` as a YAML list.
+=== IMPORTANT: CODE SUGGESTIONS ===
+✅ ALWAYS provide a suggestion with a code example
+✅ For each critical/high issue, provide the EXACT fix
+✅ Include line numbers in explanations
+✅ Group related issues together
+✅ For security issues, explain the attack vector
+
+Example format for suggestion:
+  Before: password = request.args.get('pass')
+  After:  password = request.args.get('pass')
+          validate_password_strength(password)
+
+Output all issues under `review.issues` as a YAML list (no max limit).
 """
 
 
@@ -108,6 +176,15 @@ async def run_review(
     lines_added, lines_removed = provider.get_total_lines_changed()
     print(f"📝 Reviewing {staged_count} staged file(s)  "
           f"(+{lines_added} / -{lines_removed} lines)")
+
+    # Warn when diff is too large for reliable review
+    diff_files = provider.get_diff_files()
+    total_diff_text = "".join(f.patch or "" for f in diff_files)
+    estimated_tokens = _estimate_tokens(total_diff_text)
+
+    if estimated_tokens > 30000:
+        print(f"⚠️  WARNING: Large diff ({estimated_tokens:,} tokens) — results may be incomplete")
+        print(f"    Consider splitting into smaller commits")
 
     # 2. Configure PR-Agent settings.
     from pr_agent.config_loader import get_settings
@@ -211,7 +288,7 @@ async def run_review(
         await reviewer.run()
 
         # 4. Extract the LLM response and parse it.
-        raw_response = getattr(reviewer, "prediction", "")
+        raw_response = getattr(reviewer, "prediction", "") or ""
         from pr_agent.algo.utils import load_yaml
         yaml_data = load_yaml(raw_response.strip()) if raw_response else {}
 
@@ -240,6 +317,7 @@ async def run_review(
             filename=f.filename,
             lines_added=max(0, f.num_plus_lines),
             lines_removed=max(0, f.num_minus_lines),
+            patch=f.patch,
         )
         for f in provider.get_diff_files()
     ]

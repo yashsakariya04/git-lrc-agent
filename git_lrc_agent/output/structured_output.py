@@ -114,6 +114,25 @@ class ReviewIssue(BaseModel):
         default=None,
         description="Full diff context surrounding the issue.",
     )
+    # Enhanced context fields for better code understanding
+    function_name: Optional[str] = Field(
+        default=None,
+        description="Name of the function/method containing the issue.",
+    )
+    context_lines: Optional[list[str]] = Field(
+        default=None,
+        description="3-5 lines of surrounding code for context.",
+    )
+    fix_confidence: int = Field(
+        default=50,
+        ge=0,
+        le=100,
+        description="Confidence in the suggested fix (0-100%).",
+    )
+    tags: list[str] = Field(
+        default_factory=list,
+        description="Tags: 'security', 'performance', 'maintainability', etc.",
+    )
 
     def model_post_init(self, __context) -> None:
         """Auto-generate a deterministic ID if one was not provided."""
@@ -146,6 +165,7 @@ class FileSummary(BaseModel):
     lines_removed: int = 0
     issue_count: int = 0
     max_severity: Optional[Severity] = None
+    patch: Optional[str] = None
 
 
 class ReviewSummary(BaseModel):
@@ -161,9 +181,16 @@ class ReviewSummary(BaseModel):
         le=100,
         description="Weighted risk score (0 = clean, 100 = critical).",
     )
+    # Configurable limit instead of hardcoded 3
+    max_issues_to_show: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum issues to show in summary (configurable, was hardcoded 3).",
+    )
     top_issues: list[ReviewIssue] = Field(
         default_factory=list,
-        description="Top 3 most critical issues.",
+        description="Most critical issues (up to max_issues_to_show).",
     )
     file_hotspots: list[FileSummary] = Field(
         default_factory=list,
@@ -171,6 +198,11 @@ class ReviewSummary(BaseModel):
     )
     estimated_fix_time_minutes: int = 0
     prose_summary: str = ""
+    # Quick lookup map for line-level issues
+    issues_by_line: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Map of 'file:line_start' to issue IDs for quick lookup.",
+    )
 
 
 class StructuredReview(BaseModel):
@@ -203,10 +235,20 @@ class StructuredReview(BaseModel):
     # Builders
     # ------------------------------------------------------------------
 
-    def compute_summary(self) -> None:
-        """Populate the summary from the issues list."""
+    def compute_summary(self, max_issues: int | None = None) -> None:
+        """Populate the summary from the issues list.
+
+        Parameters
+        ----------
+        max_issues
+            Override the max number of top issues to include.
+            If None, uses summary.max_issues_to_show (default 50).
+        """
         s = self.summary
         s.total_issues = len(self.issues)
+
+        # Use configurable max instead of hardcoded 3
+        max_shown = max_issues if max_issues is not None else s.max_issues_to_show
 
         # Counts by pillar / severity / category
         s.issues_by_pillar = {}
@@ -223,13 +265,21 @@ class StructuredReview(BaseModel):
             sum(SEVERITY_WEIGHTS.get(i.severity, 0) for i in self.issues),
         )
 
-        # Top 3 most critical issues
+        # Top N most critical issues (configurable, not hardcoded 3)
         severity_order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW, Severity.INFO]
         sorted_issues = sorted(
             self.issues,
             key=lambda i: severity_order.index(i.severity),
         )
-        s.top_issues = sorted_issues[:3]
+        s.top_issues = sorted_issues[:max_shown]
+
+        # Build line-by-line issue map for quick lookup
+        s.issues_by_line = {}
+        for issue in self.issues:
+            key = f"{issue.file}:{issue.line_start}"
+            if key not in s.issues_by_line:
+                s.issues_by_line[key] = []
+            s.issues_by_line[key].append(issue.id)
 
         # File hotspots
         file_issue_counts: dict[str, list[ReviewIssue]] = {}
@@ -312,12 +362,22 @@ def convert_pr_agent_output(
             if not isinstance(raw, dict):
                 continue
             try:
+                # Auto-tag issues based on category
+                category_val = raw.get("category", "Maintainability")
+                tags = []
+                if category_val == "Security":
+                    tags.append("security")
+                if category_val in ("Performance", "Scalability"):
+                    tags.append("performance")
+                if category_val in ("Maintainability", "Architecture", "Developer Experience"):
+                    tags.append("maintainability")
+
                 issues.append(ReviewIssue(
                     file=str(raw.get("file", raw.get("relevant_file", "unknown"))).strip(),
                     line_start=int(raw.get("line_start", raw.get("start_line", 0))),
                     line_end=int(raw.get("line_end", raw.get("end_line", 0))),
                     pillar=raw.get("pillar", "Technical Debt"),
-                    category=raw.get("category", "Maintainability"),
+                    category=category_val,
                     pattern=raw.get("pattern", "General"),
                     severity=raw.get("severity", "medium"),
                     title=str(raw.get("title", raw.get("issue_header", "Issue"))).strip(),
@@ -325,6 +385,10 @@ def convert_pr_agent_output(
                     suggestion=raw.get("suggestion"),
                     code_snippet=raw.get("code_snippet"),
                     diff_hunk=raw.get("diff_hunk"),
+                    function_name=raw.get("function_name"),
+                    context_lines=raw.get("context_lines"),
+                    fix_confidence=int(raw.get("fix_confidence", 50)),
+                    tags=tags,
                 ))
             except Exception:
                 continue  # skip malformed issues
