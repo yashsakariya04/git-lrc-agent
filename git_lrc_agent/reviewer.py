@@ -115,6 +115,24 @@ For each issue, provide ALL of these fields:
 - function_name: name of the affected function/method if applicable
 - fix_confidence: your confidence in the suggested fix as a percentage (0-100)
 
+=== SECURITY & QUALITY GUIDELINES ===
+Be extremely thorough and scan for EVERY potential issue in the new code diff. Do NOT limit your findings. Ensure you detect:
+1. Security Vulnerabilities:
+   - Hardcoded secrets, API keys, passwords, connection strings (e.g. GROQ_API_KEY, OpenAI, HuggingFace, DB passwords/credentials).
+   - Insecure operations (e.g., verify=False disabling SSL verification, request/socket operations without timeouts).
+   - Sensitive data leaks (e.g. logging credentials, API keys, or sensitive environment variables to stdout or log files).
+   - Unsafe serialization/deserialization (e.g. pickle.load, yaml.load without a Loader).
+   - Use of cryptographically weak hashes (e.g. MD5 or SHA1) for security-related or file integrity operations.
+2. Code Quality & Bugs:
+   - Exception handling flaws (e.g. bare except clauses swallowing errors).
+   - Zero division risks (e.g. check denominators before division).
+   - Dictionary lookup risks (e.g. check key existence or use get() to avoid KeyError).
+   - Concurrency issues (e.g. non-thread-safe singletons, race conditions, lacking synchronization/locks).
+   - Resource leaks (e.g. unclosed file handles, sockets, database connections).
+   - Infinite loops or unbounded memory growth (e.g. infinite loops in chunking/text splitting, caches without size limits or TTL/stale eviction checks).
+   - Mutable default arguments (e.g. dict/list as default values in functions).
+   - Improper logging configuration (e.g. configuring the root logger at the module level).
+
 === IMPORTANT: CODE SUGGESTIONS ===
 ✅ ALWAYS provide a suggestion with a code example
 ✅ For each critical/high issue, provide the EXACT fix
@@ -147,6 +165,7 @@ async def run_review(
     extra_instructions: str = "",
     model: str | None = None,
     security_mode: bool = False,
+    max_tokens_per_chunk: int = 1000,
 ) -> StructuredReview:
     """Run a full review on staged changes and return structured results.
 
@@ -160,6 +179,8 @@ async def run_review(
         Override the LLM model (e.g. ``"ollama/codellama"``).
     security_mode
         If True, append security-focused prompt additions.
+    max_tokens_per_chunk
+        Maximum tokens per batch chunk to avoid LLM rate/token limits.
 
     Returns
     -------
@@ -177,53 +198,141 @@ async def run_review(
     print(f"📝 Reviewing {staged_count} staged file(s)  "
           f"(+{lines_added} / -{lines_removed} lines)")
 
-    # Warn when diff is too large for reliable review
-    diff_files = provider.get_diff_files()
-    total_diff_text = "".join(f.patch or "" for f in diff_files)
-    estimated_tokens = _estimate_tokens(total_diff_text)
+    # 2. Split diff files into chunks to avoid token overflow.
+    chunks = _chunk_diff_by_files(provider, max_tokens=max_tokens_per_chunk)
+    print(f"📦 Split into {len(chunks)} batch(es) for {model or 'default'} model")
 
-    if estimated_tokens > 30000:
-        print(f"⚠️  WARNING: Large diff ({estimated_tokens:,} tokens) — results may be incomplete")
-        print(f"    Consider splitting into smaller commits")
+    # 3. Run security scanner ONCE on all files
+    all_diff_files = provider.get_diff_files()
+    from git_lrc_agent.security.scanner import scan_diff_files
+    scanner_issues = scan_diff_files(all_diff_files)
+    print(f"🛡️  Security scan: {len(scanner_issues)} issue(s) found")
 
-    # 2. Configure PR-Agent settings.
+    # 4. Process each chunk
+    all_llm_issues = []
+    for i, chunk_files in enumerate(chunks, 1):
+        print(f"\n⏳ Processing batch {i}/{len(chunks)} ({len(chunk_files)} file(s))...")
+        chunk_issues = await _review_chunk(
+            provider,
+            chunk_files,
+            extra_instructions,
+            model,
+            security_mode,
+        )
+        all_llm_issues.extend(chunk_issues)
+
+    # 5. Merge scanner + LLM findings
+    from git_lrc_agent.security.scanner import merge_with_llm_findings
+    merged_issues = merge_with_llm_findings(scanner_issues, all_llm_issues)
+
+    # 6. Create final review
+    review = StructuredReview(
+        status="reviewed",
+        commit_sha=_get_head_sha(provider),
+        branch=provider.get_pr_branch(),
+        title=provider.pr.title,
+        issues=merged_issues,
+    )
+
+    review.files = [
+        FileSummary(
+            filename=f.filename,
+            lines_added=max(0, f.num_plus_lines),
+            lines_removed=max(0, f.num_minus_lines),
+            patch=f.patch,
+        )
+        for f in all_diff_files
+    ]
+
+    # 7. Run post-LLM classifier + severity adjustment.
+    review.issues = classify_issues(review.issues)
+    for issue in review.issues:
+        adjust_severity(issue)
+
+    # 8. Recompute summary with corrected classifications.
+    review.compute_summary()
+
+    # 9. Save to .git/lrc/reviews/.
+    reviews_dir = provider.repo_path / ".git" / "lrc" / "reviews"
+    review_path = reviews_dir / f"{review.id}.json"
+    review.save(review_path)
+    print(f"✅ Review saved: {review_path}")
+    print(f"   {review.summary.total_issues} issue(s) found  |  "
+          f"Risk score: {review.summary.risk_score}/100")
+
+    # 10. Calculate and save project health metrics.
+    try:
+        from git_lrc_agent.metrics.calculator import MetricsCalculator
+        from git_lrc_agent.metrics.db import MetricsDB
+        
+        # Load review history to calculate open/persistent issues.
+        history_reviews = []
+        review_files = sorted(reviews_dir.glob("*.json"))
+        for rf in review_files:
+            if rf.name != f"{review.id}.json":
+                try:
+                    history_reviews.append(StructuredReview.load(rf))
+                except Exception:
+                    pass
+        
+        calculator = MetricsCalculator(review, repo_path=provider.repo_path)
+        metrics = calculator.calculate_metrics(review_history=history_reviews)
+        
+        db = MetricsDB(provider.repo_path)
+        db.save_metrics(review.id, metrics)
+        print(f"📊 Project Health Metrics updated: Gates {metrics.quality_gates_status} | Overall Health: {metrics.overall_health_score:.1f}%")
+    except Exception as e:
+        print(f"⚠  Could not calculate or save metrics: {e}")
+
+    return review
+
+
+async def _review_chunk(
+    provider: StagedDiffProvider,
+    chunk_files: list,
+    extra_instructions: str,
+    model: str | None,
+    security_mode: bool,
+) -> list[ReviewIssue]:
+    """Review a single batch of files."""
     from pr_agent.config_loader import get_settings
-
-    # Point PR-Agent at our staged diff provider.
-    get_settings().set("CONFIG.git_provider", "local")
-    get_settings().set("CONFIG.CLI_MODE", True)
-
-    # Inject taxonomy into extra_instructions.
-    taxonomy_instructions = _build_extra_instructions()
-    combined_extra = taxonomy_instructions
-    if extra_instructions:
-        combined_extra += f"\n\n{extra_instructions}"
-    get_settings().set("pr_reviewer.extra_instructions", combined_extra)
-
-    # Optional: override model.
-    if model:
-        get_settings().set("config.model", model)
-
-    # Disable inline comments (we handle rendering ourselves).
-    get_settings().set("pr_reviewer.inline_code_comments", False)
-
-    # Configure higher issue thresholds for detailed/advanced review.
-    if get_settings().pr_reviewer.get("num_max_findings", 3) == 3:
-        get_settings().set("pr_reviewer.num_max_findings", 20)
-
-    # 3. Run PR-Agent's PRReviewer.
     from pr_agent.algo.ai_handlers.litellm_ai_handler import LiteLLMAIHandler
     from pr_agent.tools.pr_reviewer import PRReviewer
+    from git_lrc_agent.output.structured_output import convert_pr_agent_output
 
-    ai_handler = LiteLLMAIHandler()
-
-    # Build a pseudo PR-URL for the reviewer (it needs one for initialisation).
-    pseudo_url = str(provider.repo_path)
-
+    orig_diff_files = provider.diff_files
+    orig_pr_diff_files = provider.pr.diff_files
+    
     try:
+        provider.diff_files = chunk_files
+        provider.pr.diff_files = chunk_files
+
+        # Configure PR-Agent settings.
+        get_settings().set("CONFIG.git_provider", "local")
+        get_settings().set("CONFIG.CLI_MODE", True)
+
+        # Inject taxonomy into extra_instructions.
+        taxonomy_instructions = _build_extra_instructions()
+        combined_extra = taxonomy_instructions
+        if extra_instructions:
+            combined_extra += f"\n\n{extra_instructions}"
+        get_settings().set("pr_reviewer.extra_instructions", combined_extra)
+
+        # Optional: override model.
+        if model:
+            get_settings().set("config.model", model)
+
+        # Disable inline comments (we handle rendering ourselves).
+        get_settings().set("pr_reviewer.inline_code_comments", False)
+
+        # Configure higher issue thresholds for detailed/advanced review.
+        get_settings().set("pr_reviewer.num_max_findings", 15)
+
+        ai_handler = LiteLLMAIHandler()
+
+        pseudo_url = str(provider.repo_path)
+
         reviewer = PRReviewer.__new__(PRReviewer)
-        # Manually set the fields the reviewer needs, bypassing __init__
-        # which expects a real PR URL and git provider factory lookup.
         reviewer.git_provider = provider
         reviewer.ai_handler = ai_handler
         reviewer.args = []
@@ -231,10 +340,8 @@ async def run_review(
         reviewer.is_answer = False
         reviewer.is_auto = False
 
-        # Initialize incremental (required for pr-agent >= 0.36)
         reviewer.incremental = reviewer.parse_incremental(reviewer.args)
 
-        # Get main language
         from pr_agent.git_providers.git_provider import get_main_pr_language
         reviewer.main_language = get_main_pr_language(
             provider.get_languages(), provider.get_files()
@@ -244,18 +351,16 @@ async def run_review(
         reviewer.patches_diff = None
         reviewer.prediction = None
 
-        # PR descriptions
         reviewer.pr_description, reviewer.pr_description_files = (
             provider.get_pr_description(split_changes_walkthrough=True)
         )
 
-        # Populate vars dict (exactly matching pr_reviewer.py)
         reviewer.vars = {
             "title": provider.pr.title,
             "branch": provider.get_pr_branch(),
             "description": reviewer.pr_description,
             "language": reviewer.main_language,
-            "diff": "",  # empty diff for initial calculation
+            "diff": "",
             "num_pr_files": provider.get_num_of_files(),
             "num_max_findings": get_settings().pr_reviewer.num_max_findings,
             "require_score": get_settings().pr_reviewer.require_score_review,
@@ -277,12 +382,10 @@ async def run_review(
             "date": datetime.now(timezone.utc).strftime('%Y-%m-%d'),
         }
 
-        # Initialize TokenHandler
         from pr_agent.algo.token_handler import TokenHandler
 
         system_prompt = get_settings().pr_review_prompt.system
 
-        # Enrich KeyIssuesComponentLink in Pydantic schema within the system prompt to enforce suggestion and fix_confidence fields
         old_class_def = (
             "class KeyIssuesComponentLink(BaseModel):\n"
             "    relevant_file: str = Field(description=\"The full file path of the relevant file\")\n"
@@ -299,19 +402,26 @@ async def run_review(
             "    start_line: int = Field(description=\"The start line that corresponds to this issue in the relevant file\")\n"
             "    end_line: int = Field(description=\"The end line that corresponds to this issue in the relevant file\")\n"
             "    suggestion: str = Field(description=\"A concrete suggestion for a fix, including code examples if possible.\")\n"
-            "    fix_confidence: int = Field(description=\"Your confidence in the suggested fix as a percentage from 0 to 100.\")"
+            "    fix_confidence: int = Field(description=\"Your confidence in the suggested fix as a percentage from 0 to 100.\")\n"
+            "    pillar: str = Field(description=\"One of 'Outages', 'Breaches', 'Technical Debt'\")\n"
+            "    category: str = Field(description=\"One of the risk categories, e.g., 'Security', 'Reliability', 'Performance', etc.\")\n"
+            "    pattern: str = Field(description=\"Specific failure pattern\")\n"
+            "    severity: str = Field(description=\"One of 'critical', 'high', 'medium', 'low', 'info'\")\n"
+            "    code_snippet: str = Field(description=\"The exact problematic code extracted from the diff\")\n"
+            "    function_name: str = Field(description=\"Name of the affected function/method if applicable\")"
         )
 
         if old_class_def in system_prompt:
             system_prompt = system_prompt.replace(old_class_def, new_class_def)
         else:
-            # Fallback if whitespace/carriage returns differ slightly
             normalized_old = old_class_def.replace("\r\n", "\n").strip()
             normalized_system = system_prompt.replace("\r\n", "\n")
             if normalized_old in normalized_system:
                 system_prompt = normalized_system.replace(normalized_old, new_class_def.replace("\r\n", "\n"))
             else:
                 system_prompt += "\n\nInject the 'suggestion' and 'fix_confidence' fields into every item in the 'key_issues_to_review' list."
+
+        get_settings().set("pr_review_prompt.system", system_prompt)
 
         reviewer.token_handler = TokenHandler(
             provider.pr,
@@ -320,61 +430,38 @@ async def run_review(
             get_settings().pr_review_prompt.user
         )
 
-        # Actually call the async run method.
-        # We need to handle this carefully — PRReviewer.run() calls
-        # _get_prediction() and _prepare_pr_review() internally.
-        await reviewer.run()
+        raw_response = ""
+        for attempt in range(1, 4):
+            await reviewer.run()
+            raw_response = getattr(reviewer, "prediction", "") or ""
+            if raw_response:
+                break
+            
+            if attempt < 3:
+                print(f"⚠️  Batch processing failed or rate limited. Retrying in 35 seconds (attempt {attempt}/3)...")
+                await asyncio.sleep(35)
 
-        # 4. Extract the LLM response and parse it.
-        raw_response = getattr(reviewer, "prediction", "") or ""
+        if not raw_response:
+            raise RuntimeError("Review prediction failed for a chunk — the LLM did not return any prediction content after retries. Check console logs above for API, Rate Limit, or other errors.")
+            
         from pr_agent.algo.utils import load_yaml
         yaml_data = load_yaml(raw_response.strip()) if raw_response else {}
 
-    except Exception as e:
-        print(f"⚠  Review engine error: {e}")
-        # Return a minimal review with the error.
-        return StructuredReview(
-            status="reviewed",
-            commit_sha=_get_head_sha(provider),
+        chunk_review = convert_pr_agent_output(
+            yaml_data,
+            commit_sha=None,
             branch=provider.get_pr_branch(),
             title=provider.pr.title,
+            raw_response=raw_response,
         )
+        return chunk_review.issues
 
-    # 5. Convert to structured format.
-    review = convert_pr_agent_output(
-        yaml_data,
-        commit_sha=_get_head_sha(provider),
-        branch=provider.get_pr_branch(),
-        title=provider.pr.title,
-        raw_response=raw_response,
-    )
-
-    # 6. Build FileSummary entries.
-    review.files = [
-        FileSummary(
-            filename=f.filename,
-            lines_added=max(0, f.num_plus_lines),
-            lines_removed=max(0, f.num_minus_lines),
-            patch=f.patch,
-        )
-        for f in provider.get_diff_files()
-    ]
-
-    # 7. Run post-LLM classifier + severity adjustment.
-    review.issues = classify_issues(review.issues)
-    for issue in review.issues:
-        adjust_severity(issue)
-
-    # 8. Recompute summary with corrected classifications.
-    review.compute_summary()
-
-    # 9. Save to .git/lrc/reviews/.
-    reviews_dir = provider.repo_path / ".git" / "lrc" / "reviews"
-    review_path = reviews_dir / f"{review.id}.json"
-    review.save(review_path)
-    print(f"✅ Review saved: {review_path}")
-    print(f"   {review.summary.total_issues} issue(s) found  |  "
-          f"Risk score: {review.summary.risk_score}/100")
+    except Exception as e:
+        print(f"❌ Error processing chunk: {e}", file=sys.stderr)
+        raise e
+    finally:
+        provider.diff_files = orig_diff_files
+        provider.pr.diff_files = orig_pr_diff_files
 
     # 10. Calculate and save project health metrics.
     try:
